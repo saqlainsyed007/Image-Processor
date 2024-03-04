@@ -1,0 +1,111 @@
+version: "3.9"
+
+services:
+
+  image-processor-postgres:
+    image: postgres
+    container_name: image-processor-postgres
+    restart: always
+    environment:
+      POSTGRES_PASSWORD: password
+
+  image-processor-redis:
+    image: redis:7
+    container_name: image-processor-redis
+    ports:
+      - "6379:6379"
+    tty: true
+
+  image-processor-rabbitmq:
+    image: rabbitmq:3.11.6
+    container_name: image-processor-rabbitmq
+    ports:
+      - 5672:5672
+      - 15672:15672
+    restart: always
+
+  image-processor-django:
+    image: python:3.10
+    container_name: image-processor-django
+    working_dir: /usr/src/app
+    ports:
+      - "8000:8000"
+      - "8765:8765"
+    volumes:
+      - ./ImageProcessor:/usr/src/app
+      - image-processor-images:/usr/image-processor-images
+    command: >
+      bash -c "
+        pip install --upgrade pip &&
+        pip install -r requirements.txt &&
+        python manage.py migrate &&
+        python manage.py ensure_admin &&
+        python manage.py runserver 0:8000
+      "
+    environment:
+      DEBUG: True
+      DATABASE_URL: "postgres://postgres:password@image-processor-postgres:5432/postgres"
+      DJANGO_SECRET_KEY: "django-secure-_8#+pna*a95(%)9a$sm)!5_ldhjrj@k7_m9n#2_6lq5mxeohev"
+      MEDIA_ROOT: "/usr/image-processor-images"
+      CELERY_BROKER_URL: "redis://image-processor-redis:6379/1"
+      CELERY_RESULT_BACKEND: "django-db"
+      RABBIT_MQ_HOST: "image-processor-rabbitmq"
+      RABBIT_MQ_PORT: "5672"
+      RABBIT_MQ_IMAGE_EXCHANGE_NAME: "image_exchange"
+      RABBIT_MQ_GREY_SCALE_CONVERT_TOPIC_NAME: "image.convert.greyscale"
+      DJANGO_SUPERUSER_USERNAME: admin
+      DJANGO_SUPERUSER_PASSWORD: admin
+      DJANGO_SUPERUSER_EMAIL: admin.user@email.com
+    depends_on:
+      - image-processor-postgres
+
+  image-processor-celery:
+    image: python:3.10
+    container_name: image-processor-celery
+    working_dir: /usr/src/app
+    volumes:
+      - ./ImageProcessor:/usr/src/app
+      - image-processor-images:/usr/image-processor-images
+    command: >
+      bash -c "
+        pip install --upgrade pip &&
+        pip install -r requirements.txt &&
+        mkdir -p /var/run/celery/ &&
+        celery -A ImageProcessor worker -l INFO --statedb=/var/run/celery/worker.state
+      "
+    environment:
+      DEBUG: True
+      DATABASE_URL: "postgres://postgres:password@image-processor-postgres:5432/postgres"
+      DJANGO_SECRET_KEY: "django-secure-_8#+pna*a95(%)9a$sm)!5_ldhjrj@k7_m9n#2_6lq5mxeohev"
+      MEDIA_ROOT: "/usr/image-processor-images"
+      CELERY_BROKER_URL: "redis://image-processor-redis:6379/1"
+      CELERY_RESULT_BACKEND: "django-db"
+      RABBIT_MQ_HOST: "image-processor-rabbitmq"
+      RABBIT_MQ_PORT: "5672"
+      RABBIT_MQ_IMAGE_EXCHANGE_NAME: "image_exchange"
+      RABBIT_MQ_GREY_SCALE_CONVERT_TOPIC_NAME: "image.convert.greyscale"
+    depends_on:
+      - image-processor-rabbitmq
+      - image-processor-redis
+      - image-processor-postgres
+      - image-processor-django
+
+  image-processor-greyscale-converter:
+    image: python:3.10
+    container_name: image-processor-greyscale-converter
+    working_dir: /usr/src/app
+    volumes:
+      - ./GreyScale:/usr/src/app
+      - image-processor-images:/usr/image-processor-images
+    environment:
+      GREY_SCALE_IMAGE_DIR: /usr/image-processor-images/processed_images
+      BACKEND_URL: http://image-processor-django:8000
+    command: >
+      bash -c "
+        pip install --upgrade pip &&
+        pip install -r requirements.txt &&
+        python rabbitmq_consumer.py
+      "
+
+volumes:
+  image-processor-images:
